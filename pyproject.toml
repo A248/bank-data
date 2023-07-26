@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "bank-data"
+version = "0.1.0"
+description = ""
+authors = ["A248 <theanandbeh@gmail.com>"]
+readme = "README.md"
+license = "GPL-3.0-or-later"
+packages = [{include = "condenser"}]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+requests = "^2.31.0"
+openpyxl = "^3.0"
+update = "^0.0.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

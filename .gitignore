@@ -1,0 +1,16 @@
+
+# Intellij IDEA
+*.iml
+.idea/
+
+# Cargo
+target/
+
+# Python
+dist/
+__pycache__/
+
+# Project-specific
+data/
+downloaded-datasets/
+/existing-work/
