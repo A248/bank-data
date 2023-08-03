@@ -17,44 +17,52 @@
  * and navigate to version 3 of the GNU General Public License.
  */
 
-use std::net::{IpAddr, SocketAddr};
+use std::fmt::Debug;
 use std::pin::Pin;
 use std::ptr;
-use std::str::FromStr;
+use std::sync::OnceLock;
 use std::task::{Context, Poll};
-use futures_io::AsyncWrite;
+use futures_io::{AsyncRead, AsyncWrite};
 use async_std::net::TcpStream;
 use async_std::path::{Path, PathBuf};
 use async_std::{io, task};
 use async_std::fs::OpenOptions;
+use async_tls::TlsConnector;
 use http_body_util::{BodyExt, Empty};
-use hyper::body::{Buf, Bytes, Incoming};
+use hyper::body::{Bytes, Incoming};
 use hyper::client::conn::http1::SendRequest;
 use hyper::{header, Method, Request, Response, StatusCode, Uri};
 use eyre::Result;
 use futures::AsyncWriteExt;
 
+static TLS_CONNECTOR: OnceLock<TlsConnector> = OnceLock::new();
 
-pub trait DownloadHandler {
+pub trait DownloadHandler: Debug {
     fn destination_file(&self, url: &str) -> Result<PathBuf>;
 }
 
 pub struct Connection<'dh, DH> {
     handler: &'dh DH,
-    host: IpAddr,
-    sender: SendRequest<Empty<Bytes>>
+    host: (Box<str>, u16),
+    sender: SendRequest<Empty<Bytes>>,
+    hit_count: usize
 }
 
 impl<'dh, DH> Connection<'dh, DH> where DH: DownloadHandler {
     pub async fn open_connection(handler: &'dh DH, host: &str) -> Result<Connection<'dh, DH>> {
-        let host = IpAddr::from_str(host)?;
-        Self::open_connection_with(handler, host).await
+        let host = (Box::from(host), 443);
+        Self::open_connection_internal(handler, host, 0).await
     }
 
-    async fn open_connection_with(handler: &'dh DH, host: IpAddr) -> Result<Connection<'dh, DH>> {
-        let stream = TcpStreamWrapper(TcpStream::connect(SocketAddr::new(host, 80)).await?);
+    async fn open_connection_internal(handler: &'dh DH, (domain, port): (Box<str>, u16),
+                                      hit_count: usize) -> Result<Connection<'dh, DH>> {
+        let tls = TLS_CONNECTOR.get_or_init(|| TlsConnector::default());
+
+        let stream = TcpStream::connect((&domain as &str, port)).await?;
+        let stream = StreamWrapper(tls.connect(&domain, stream).await?);
         let (sender, connection) = hyper::client::conn::http1::handshake(stream).await?;
 
+        log::debug!("Opened connection using {:?}", handler);
         task::spawn(async move {
             if let Err(e) = connection.await {
                 log::warn!("Error while polling HTTP connection: {}", e);
@@ -62,12 +70,15 @@ impl<'dh, DH> Connection<'dh, DH> where DH: DownloadHandler {
         });
         Ok(Connection {
             handler,
-            host,
-            sender
+            host: (domain, port),
+            sender,
+            hit_count
         })
     }
 
     pub async fn download(&mut self, url: String) -> Result<bool> {
+        log::debug!("Connecting to url {}", &url);
+
         let parsed_uri = url.parse::<Uri>()?;
         let authority = parsed_uri.authority().expect("No authority").clone();
 
@@ -77,9 +88,12 @@ impl<'dh, DH> Connection<'dh, DH> where DH: DownloadHandler {
             .header(header::HOST, authority.as_str())
             .body(Empty::<Bytes>::new())?;
 
+        self.sender.ready().await?;
+        self.hit_count += 1;
+
         let response = self.sender.send_request(request).await?;
         match response.status() {
-            StatusCode::NOT_FOUND | StatusCode::TEMPORARY_REDIRECT | StatusCode::MOVED_PERMANENTLY => Ok(false),
+            StatusCode::NOT_FOUND | StatusCode::FOUND | StatusCode::MOVED_PERMANENTLY => Ok(false),
             StatusCode::OK => {
                 let destination = self.handler.destination_file(&url)?;
                 self.complete_download(response, &destination).await?;
@@ -98,25 +112,31 @@ impl<'dh, DH> Connection<'dh, DH> where DH: DownloadHandler {
             }
         };
         if refresh_connection {
-            *self = Self::open_connection_with(self.handler, self.host).await?;
+            let host = std::mem::replace(&mut self.host, (Box::default(), 0));
+            *self = Self::open_connection_internal(self.handler, host, self.hit_count).await?;
         }
         let file = OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(filename).await?;
         let mut file = io::BufWriter::new(file);
-        while let Some(frame) = response.frame().await {
-            if let Some(next_chunk) = frame?.data_ref() {
+        while let Some(frame) = response.frame().await.transpose()? {
+            if let Some(next_chunk) = frame.data_ref() {
                 file.write_all(&next_chunk).await?;
             }
         }
         Ok(())
     }
+
+    pub fn hit_count(self) -> usize {
+        self.sender.is_closed();
+        self.hit_count
+    }
 }
 
-struct TcpStreamWrapper(TcpStream);
+struct StreamWrapper<IO>(IO);
 
-impl hyper::rt::Read for TcpStreamWrapper {
+impl<IO> hyper::rt::Read for StreamWrapper<IO> where IO: AsyncRead + Unpin {
     fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, mut buf: hyper::rt::ReadBufCursor<'_>) -> Poll<io::Result<()>> {
         let pinned_self = Pin::new(&mut self.0);
         unsafe {
@@ -126,7 +146,7 @@ impl hyper::rt::Read for TcpStreamWrapper {
             // Assume initialized
             let buffer: &mut [u8] = std::mem::transmute(buffer);
             let num_bytes = task::ready!(
-                futures_io::AsyncRead::poll_read(pinned_self, cx, buffer)?
+                AsyncRead::poll_read(pinned_self, cx, buffer)?
             );
             buf.advance(num_bytes);
         }
@@ -134,7 +154,7 @@ impl hyper::rt::Read for TcpStreamWrapper {
     }
 }
 
-impl hyper::rt::Write for TcpStreamWrapper {
+impl<IO> hyper::rt::Write for StreamWrapper<IO> where IO: AsyncWrite + Unpin {
     fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         let pinned_self = Pin::new(&mut self.0);
         pinned_self.poll_write(cx, buf)

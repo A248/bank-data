@@ -17,105 +17,137 @@
  * and navigate to version 3 of the GNU General Public License.
  */
 
+use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
+use std::num::NonZeroU16;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use async_std::path::{Path, PathBuf};
 use async_std::stream::StreamExt;
-use chrono::{Datelike, Month};
 use eyre::Result;
 use futures::stream::FuturesUnordered;
 use hyper::Uri;
-use crate::common::MonthlyReport;
+use crate::common::{current_year, MonthlyReport, Year, Month};
 use crate::http::{Connection, DownloadHandler};
 
 const WEBSITE_PREFIX: &'static str = "https://www.bb.org.bd/pub/monthly/econtrds";
-const XL_EXTENSIONS: [&'static str; 2] = ["xlsx", "xls"];
-
-fn current_year() -> i32 {
-    let current_year = chrono::Utc::now();
-    let current_year = current_year.year();
-    log::info!("Current year is {}", current_year);
-    current_year
-}
+const XL_EXTENSIONS: [SheetExtension; 2] = [SheetExtension::Xlsx, SheetExtension::Xls];
 
 pub struct Download<'d> {
-    pub data_dir: &'d Path
+    data_dir: &'d Path,
+    total_hit_count: AtomicUsize
 }
 
-impl Download<'_> {
-    async fn download_year(&self, year: i32) -> Result<YearlyReport> {
-        let mut missing_months = Vec::new();
-        let mut month = Month::January;
-        loop {
-            let next_month = month.succ();
+impl<'d> Download<'d> {
+    pub fn new(data_dir: &'d Path) -> Self {
+        Self {
+            data_dir,
+            total_hit_count: AtomicUsize::default()
+        }
+    }
+
+    async fn download_year(&self, year: Year) -> Result<YearlyReport> {
+
+        let mut outcomes = HashMap::new();
+
+        for month in Month::values() {
+
             let report = MonthlyReport {
                 month, year
             };
-            if !report.download_if_possible(self.data_dir).await? {
-                missing_months.push(month);
-            }
-            if next_month == Month::January {
-                break;
-            }
-            month = next_month
+            let (status, hit_count) = report.download_if_possible(self.data_dir).await?;
+            outcomes.insert(month, status);
+            self.total_hit_count.fetch_add(hit_count, Ordering::AcqRel);
         }
-        Ok(YearlyReport { year, missing_months })
+        Ok(YearlyReport { year, outcomes })
     }
 
     pub async fn download_all(&self) -> Result<()> {
         // Parallelize per year
         let mut yearly_reports = FuturesUnordered::new();
-        for year in 2023..=current_year() {
+        for year in 2013..=current_year() {
+            let year = Year(NonZeroU16::new(year).expect("Non-zero year"));
             yearly_reports.push(self.download_year(year));
         }
-        while let Some(YearlyReport { year, missing_months }) = yearly_reports.next().await.transpose()? {
-            let missing_months = missing_months
+        let mut total_downloads = 0;
+        while let Some(YearlyReport { year, outcomes }) = yearly_reports.next().await.transpose()? {
+            let download_count = outcomes
                 .iter()
+                .filter(|(_month, status)| {
+                    if let ReportStatus::Downloaded(_ext) = **status {
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .count();
+            let missing_months = outcomes
+                .iter()
+                .filter_map(|(month, status)| {
+                    if let ReportStatus::Missing = status {
+                        Some(month)
+                    } else {
+                        None
+                    }
+                })
                 .map(Month::name)
-                .map(Box::from)
-                .collect::<Vec<_>>()
-                .join(", ");
-            log::warn!("In {}, data is unavailable for {}", year, missing_months);
+                .collect::<Vec<_>>();
+            if missing_months.is_empty() {
+                log::info!("Downloaded {} files for {}.", download_count, year);
+            } else {
+                let missing_months = missing_months.join(", ");
+                log::info!(
+                    "Downloaded {} files for {}. However, data is unavailable for months {}.",
+                    download_count, year, missing_months
+                );
+            }
+            total_downloads += download_count;
         }
+        let total_hit_count = self.total_hit_count.load(Ordering::Acquire);
+        log::info!(
+            "Accessed {} URLs and downloaded {} files total from the central bank website.",
+            total_hit_count, total_downloads
+        );
         Ok(())
     }
 }
 
 struct YearlyReport {
-    year: i32,
-    missing_months: Vec<Month>
+    year: Year,
+    outcomes: HashMap<Month, ReportStatus>
 }
 
 impl MonthlyReport {
 
     async fn attempt_urls<DH>(&self, connection: &mut Connection<'_, DH>)
-        -> Result<bool> where DH: DownloadHandler {
+        -> Result<ReportStatus> where DH: DownloadHandler {
 
-        fn populate_urls(month: &str, year: &str, extension: &str) -> [String; 4] {
+        fn populate_urls(month: &str, year: &str, extension: SheetExtension) -> [String; 4] {
             let prefix = WEBSITE_PREFIX;
             [
                 format!("{}/et{}{}.{}", prefix, month, year, extension),
-                format!("{}/econtrends_{}{}.{}", prefix, year, month, extension),
-                format!("{}/ET{}{}.{}", prefix, year, month, extension),
-                format!("{}/{}{}/statisticaltable.{}", prefix, year, month, extension)
+                format!("{}/econtrends_{}{}.{}", prefix, month, year, extension),
+                format!("{}/ET{}{}.{}", prefix, month, year, extension),
+                format!("{}/{}{}/statisticaltable.{}", prefix, month, year, extension)
             ]
         }
 
         async fn attempt_urls_using<const M: usize, const Y: usize, DH>(months: [&str; M],
                                                                     years: [&str; Y],
                                                                     connection: &mut Connection<'_, DH>)
-            -> Result<bool> where DH: DownloadHandler {
+            -> Result<ReportStatus> where DH: DownloadHandler {
 
             for month in months {
                 for year in years {
                     for extension in XL_EXTENSIONS {
                         for url in populate_urls(month, year, extension) {
                             if connection.download(url).await? {
-                                return Ok(true);
+                                return Ok(ReportStatus::Downloaded(extension));
                             }
                         }
                     }
                 }
             }
-            Ok(false)
+            Ok(ReportStatus::Missing)
         }
         let month = self.month.name();
         let lower_month = month.to_lowercase();
@@ -123,7 +155,7 @@ impl MonthlyReport {
         let lower_short_month = &lower_month[0..3];
 
         let year = self.year.to_string();
-        let short_year = &year[0..2];
+        let short_year = &year[2..];
 
         attempt_urls_using(
             [month, &lower_month, short_month, lower_short_month],
@@ -132,17 +164,18 @@ impl MonthlyReport {
         ).await
     }
 
-    async fn download_if_possible(&self, data_dir: &Path) -> Result<bool> {
-        let mut filename_prefix = format!("{}-{}.", self.year, self.month.number_from_month());
+    async fn download_if_possible(&self, data_dir: &Path) -> Result<(ReportStatus, usize)> {
+        let mut filename_prefix = format!("{}-{}.", self.year, self.month.as_numeric());
         for extension in XL_EXTENSIONS {
-            filename_prefix.push_str(extension);
+            filename_prefix.push_str(extension.value());
             if data_dir.join(&filename_prefix).exists().await {
-                return Ok(true);
+                return Ok((ReportStatus::ExistsPreviously(extension), 0));
             }
-            for _ in extension.chars() {
+            for _ in extension.value().chars() {
                 filename_prefix.pop();
             }
         }
+        // No existing files found; try URLs to download
         let handler = Handler {
             data_dir,
             filename_prefix: &filename_prefix,
@@ -150,13 +183,42 @@ impl MonthlyReport {
         let website_prefix = WEBSITE_PREFIX.parse::<Uri>()?;
         let host = website_prefix.host().expect("No host");
         let mut connection = Connection::open_connection(&handler, host).await?;
-        let downloaded = self.attempt_urls(&mut connection).await?;
-        Ok(downloaded)
+        let download_outcome = self.attempt_urls(&mut connection).await?;
+        let hit_count = connection.hit_count();
+        Ok((download_outcome, hit_count))
     }
 
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum ReportStatus {
+    ExistsPreviously(SheetExtension),
+    Downloaded(SheetExtension),
+    Missing
+}
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum SheetExtension {
+    Xlsx,
+    Xls
+}
+
+impl SheetExtension {
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Xlsx => "xlsx",
+            Self::Xls => "xls"
+        }
+    }
+}
+
+impl Display for SheetExtension {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.value())
+    }
+}
+
+#[derive(Debug)]
 struct Handler<'h> {
     data_dir: &'h Path,
     filename_prefix: &'h str
@@ -165,7 +227,7 @@ struct Handler<'h> {
 impl Handler<'_> {
     fn filename(&self, url: &str) -> Result<String> {
         for extension in XL_EXTENSIONS {
-            if url.ends_with(extension) {
+            if url.ends_with(extension.value()) {
                 return Ok(format!("{}{}", self.filename_prefix, extension));
             }
         }

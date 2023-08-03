@@ -18,9 +18,18 @@ async-std = "1.12.0"
 chrono = "0.4.26"
 futures = "0.3.28"
 futures-io = "0.3.28"
-hyper = { version = "1.0.0-rc.4", features = ["http1", "client"] }
+hyper = { version = "1.0.0-rc.4", default-features = false, features = ["http1", "client"] }
 http-body-util = "0.1.0-rc.3"
+async-tls = { version = "0.12.0", default-features = false, features = ["client"] }
 async-trait = "0.1.72"
 dashmap = "5.5.0"
 smallvec = "1.11.0"
+arc-interner = "0.7.0"
 calamine = "0.21.2"
+regex = "1.9.1"
+assert_matches = "1.5.0"
+csv-async = "1.2.6"
+
+[profile.release]
+debug = true
+overflow-checks = true

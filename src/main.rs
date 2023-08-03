@@ -21,14 +21,15 @@ mod download;
 mod merge;
 mod http;
 mod common;
+mod parse;
+mod analysis;
 
 use std::{env};
+use std::ffi::OsString;
 use async_std::path::{Path, PathBuf};
 use log::LevelFilter;
 use simplelog::{ColorChoice, Config, TerminalMode, TermLogger};
 use async_std::{fs, io, io::WriteExt, task};
-use async_std::prelude::FutureExt;
-use hyper::body::Body;
 use crate::download::Download;
 use crate::merge::MergeXL;
 use eyre::Result;
@@ -59,18 +60,20 @@ impl Console {
         }
     }
 
+    /// Prints a line to STDOUT
     async fn output(&mut self, line: &[u8]) -> Result<()> {
         self.stdout.write_all(line).await?;
         self.stdout.write_all(b"\n").await?;
         Ok(self.stdout.flush().await?)
     }
 
+    /// Asks the user a question
     async fn input(&mut self, question: &[u8]) -> Result<String> {
         let mut answer = String::new();
         self.stdout.write_all(question).await?;
         self.stdout.flush().await?;
         self.stdin.read_line(&mut answer).await?;
-        answer.pop();
+        answer.pop(); // Remove trailing newline
         Ok(answer)
     }
 }
@@ -78,7 +81,11 @@ impl Console {
 async fn async_main() -> Result<()> {
 
     let mut console = Console::new();
-    let data_dir = {
+    // Find the user's data directory
+    let data_dir = if let Some(from_env_var) = env::var_os("DATA_DIR") {
+        log::info!("Detected data directory from environment: {}", from_env_var.to_string_lossy());
+        PathBuf::from(from_env_var)
+    } else {
         let mut data_dir = console.input(b"Define the dataset directory (default: data):").await?;
         if data_dir.is_empty() {
             data_dir.push_str("data");
@@ -86,28 +93,32 @@ async fn async_main() -> Result<()> {
         console.output(format!("Using data directory '{}'", &data_dir).as_bytes()).await?;
         PathBuf::from(data_dir)
     };
+    // Create that directory if it doesn't exist
     fs::create_dir_all(&data_dir).await?;
     loop {
         let choice = console.input(
             b"Choose whether to download new datasets, or condense the existing ones
+                     \nWARNING: The downloader WILL get you IP-banned by Bangladesh Bank
+                     \nUSE THE DOWNLOADER WITH CAUTION
+
                      \n1. Download new
                      \n2. Condense existing
                      \nYour choice:").await?;
         match choice.as_str() {
             "1" => {
                 console.output(b"Downloading new datasets").await?;
-                let download = Download {
-                    data_dir: &data_dir,
-                };
+                let download = Download::new(&data_dir);
                 download.download_all().await?;
                 break
             }
             "2" => {
                 console.output(b"Merging existing datasets").await?;
-                let destination = PathBuf::from("./output.xlsx");
-                let mut merge_xl = MergeXL::default();
+                let destination_prefix = OsString::from("./output");
+                let merge_xl = MergeXL::default();
                 merge_xl.load_all_from(&data_dir).await?;
-                merge_xl.write_to(&destination).await?;
+                merge_xl.write_to(&destination_prefix).await?;
+                console.output(b"-- Critical reminders! --").await?;
+                console.output(b"Please note if you are using CPI data, there is sometimes a base year change in 2012-2013").await?;
                 break
             }
             _ => {
@@ -115,7 +126,7 @@ async fn async_main() -> Result<()> {
             }
         }
     }
-    console.output(b"Program finished\n").await?;
+    console.output(b"\nProgram finished").await?;
     Ok(())
 }
 
