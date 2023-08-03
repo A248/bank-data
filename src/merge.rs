@@ -103,6 +103,7 @@ impl MergeXL {
                         }
                         writer.write_record(record).await?;
                     }
+                    writer.flush().await?;
                     Ok(())
                 } else {
                     Err(eyre::eyre!("Sheet not held exclusively"))
