@@ -52,11 +52,13 @@ pub enum FileStatus {
     ErrorsAnalyzing(Vec<String>)
 }
 
+/// For working with csv-async, we need AsRef<[u8]>. This wrapper imposes zero overhead.
+/// An excellent example of the beauty of Rust.
 struct CowAsU8<'d>(Cow<'d, str>);
 
 impl AsRef<[u8]> for CowAsU8<'_> {
     fn as_ref(&self) -> &[u8] {
-        self.0.as_ref().as_bytes()
+        self.0.as_bytes()
     }
 }
 
@@ -81,7 +83,7 @@ impl MergeXL {
                 if let Some(sheet) = Arc::into_inner(sheet) {
 
                     let columns = sheet.columns.into_iter().collect::<Vec<_>>();
-                    // Writer the header
+                    // Write the header
                     let mut header = Vec::new();
                     header.push(String::from("timestamp-primary-key"));
                     for column in &columns {
@@ -89,9 +91,13 @@ impl MergeXL {
                     }
                     writer.write_record(&header).await?;
 
+                    // Write all the data
                     for (timestamp, mut data) in sheet.rows {
                         let mut record = Vec::new();
+
+                        // Timestamp comes first
                         record.push(CowAsU8(Cow::Owned(timestamp.to_string())));
+                        // Then the regular data columns
                         for column in columns.iter() {
                             let item = data.data.remove(column);
                             let item = if let Some(item) = item {
