@@ -198,6 +198,8 @@ macro_rules! impl_from_str_using_start_end_months {
                 // 1. Permit empty spaces between months and hyphen
                 // 2. Handle trailing periods before the start or end month
                 // 3. Allow four- or three-letter month names
+
+                let value = value.trim();
                 if value.ends_with('.') {
                     return Self::from_str(value.trim_end_matches('.'));
                 }
