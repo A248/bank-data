@@ -75,6 +75,7 @@ impl MergeXL {
 
                 let mut destination = destination.to_os_string();
                 destination.push(&format!("-timestamp-{}.csv", hash));
+                log::info!("Writing to output file {}", destination.to_string_lossy());
                 let destination = OpenOptions::new()
                     .write(true)
                     .create(true)
@@ -83,8 +84,9 @@ impl MergeXL {
                 if let Some(sheet) = Arc::into_inner(sheet) {
 
                     let columns = sheet.columns.into_iter().collect::<Vec<_>>();
+                    let record_length = columns.len() + 1;
                     // Write the header
-                    let mut header = Vec::new();
+                    let mut header = Vec::with_capacity(record_length);
                     header.push(String::from("timestamp-primary-key"));
                     for column in &columns {
                         header.push(column.display_full_labeling());
@@ -93,7 +95,7 @@ impl MergeXL {
 
                     // Write all the data
                     for (timestamp, mut data) in sheet.rows {
-                        let mut record = Vec::new();
+                        let mut record = Vec::with_capacity(record_length);
 
                         // Timestamp comes first
                         record.push(CowAsU8(Cow::Owned(timestamp.to_string())));
@@ -125,6 +127,7 @@ impl MergeXL {
     /// Loads all excel files from the given data directory into memory
     pub async fn load_all_from(&self, data_dir: &Path) -> Result<()> {
 
+        // Load every file in parallel
         let mut tasks = FuturesUnordered::new();
         let mut files = fs::read_dir(data_dir).await?;
 
@@ -228,11 +231,19 @@ impl MergeFile<'_> {
             return Ok(None);
         }
         let file = self.file.path();
-        Ok(Some(if filename.ends_with(".xls") {
-            (file, FileStatus::XlsUnsupported)
+
+        Ok(if filename.ends_with(".xlsx") {
+            // Received correct file type
+            Some(self.perform_merge_data(file).await?)
+
+        } else if filename.ends_with(".xls") {
+            // .xls currently unsupported
+            Some((file, FileStatus::XlsUnsupported))
+
         } else {
-            self.perform_merge_data(file).await?
-        }))
+            // Not .xls or .xlsx
+            None
+        })
     }
 
     async fn perform_merge_data(&self, file: PathBuf) -> Result<(PathBuf, FileStatus)> {
@@ -241,7 +252,7 @@ impl MergeFile<'_> {
             Ok((file, sheets))
         }).and_then(|(file, sheets)| async move {
             let filename = file.to_string_lossy();
-            let mut errors = vec![];
+            let mut errors = Vec::new();
             for (name, sheet) in sheets {
                 let analyzer = SheetAnalyzer {
                     source: &filename,

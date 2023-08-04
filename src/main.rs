@@ -73,7 +73,8 @@ impl Console {
         self.stdout.write_all(question).await?;
         self.stdout.flush().await?;
         self.stdin.read_line(&mut answer).await?;
-        answer.pop(); // Remove trailing newline
+        // Remove newline characters
+        answer.retain(|c| !['\n', '\r', '\t'].contains(&c));
         Ok(answer)
     }
 }
