@@ -24,15 +24,16 @@ mod common;
 mod parse;
 mod analysis;
 
-use std::{env};
+use std::env;
 use std::ffi::OsString;
-use async_std::path::{Path, PathBuf};
+use async_std::path::PathBuf;
 use log::LevelFilter;
 use simplelog::{ColorChoice, Config, TerminalMode, TermLogger};
-use async_std::{fs, io, io::WriteExt, task};
+use async_std::{fs, fs::OpenOptions, io, io::WriteExt, task};
 use crate::download::Download;
 use crate::merge::MergeXL;
 use eyre::Result;
+use futures::StreamExt;
 
 fn main() -> core::result::Result<(), eyre::Error> {
 
@@ -122,6 +123,14 @@ async fn async_main() -> Result<()> {
                 console.output(b"Please note if you are using CPI data, there is sometimes a base year change in 2012-2013").await?;
                 break
             }
+            "3" => {
+                console.output(b"Reading statistical data from each CSV in current directory").await?;
+                let (columns, rows) = count_csv_data().await?;
+                console.output(format!(
+                    "Found {} columns and {} rows in all CSV files", columns, rows
+                ).as_bytes()).await?;
+                break;
+            }
             _ => {
                 console.output(b"Invalid answer. Try again.").await?;
             }
@@ -131,10 +140,25 @@ async fn async_main() -> Result<()> {
     Ok(())
 }
 
-pub struct DataDir(PathBuf);
-
-impl DataDir {
-    pub fn path(&self) -> &Path {
-        &self.0
+async fn count_csv_data() -> Result<(usize, usize)> {
+    let mut files = fs::read_dir(PathBuf::from(".")).await?;
+    let mut column_count = 0;
+    let mut row_count = 0;
+    while let Some(file) = files.next().await.transpose()? {
+        let file = file.path();
+        let file_name = file.to_string_lossy();
+        if !file_name.ends_with(".csv") {
+            continue;
+        }
+        let mut csv_reader = csv_async::AsyncReader::from_reader(
+            OpenOptions::new().read(true).open(&file).await?
+        );
+        let header = csv_reader.byte_headers().await?;
+        let columns = header.len();
+        let rows = csv_reader.into_byte_records().count().await;
+        column_count += columns;
+        row_count += rows;
+        log::info!("Found {} columns, {} rows in {}", columns, rows, file_name);
     }
+    Ok((column_count, row_count))
 }

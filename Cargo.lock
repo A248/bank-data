@@ -424,9 +424,6 @@ dependencies = [
  "cfg-if",
  "csv-core",
  "futures",
- "itoa",
- "ryu",
- "serde",
 ]
 
 [[package]]
@@ -1079,12 +1076,6 @@ checksum = "2d3987094b1d07b653b7dfdc3f70ce9a1da9c51ac18c1b06b662e4f9a0e9f4b2"
 dependencies = [
  "base64",
 ]
-
-[[package]]
-name = "ryu"
-version = "1.0.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ad4cc8da4ef723ed60bced201181d83791ad433213d8c24efffda1eec85d741"
 
 [[package]]
 name = "scopeguard"

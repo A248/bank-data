@@ -18,11 +18,9 @@
  */
 
 use std::borrow::Cow;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt::{Debug, Display, Formatter, Write};
-use std::hash::{Hash, Hasher};
 use std::mem;
 use std::sync::Arc;
 use arc_interner::ArcIntern;
@@ -69,12 +67,8 @@ impl MergeXL {
         for (identifier, sheet) in self.sheets.into_inner() {
             tasks.push(async move {
 
-                let mut hasher = DefaultHasher::new();
-                identifier.hash(&mut hasher);
-                let hash = hasher.finish();
-
                 let mut destination = destination.to_os_string();
-                destination.push(&format!("-timestamp-{}.csv", hash));
+                destination.push(&format!("-timestamp-{:?}.csv", identifier));
                 log::info!("Writing to output file {}", destination.to_string_lossy());
                 let destination = OpenOptions::new()
                     .write(true)

@@ -392,58 +392,6 @@ impl SupportedSheet<'_, '_> {
             }
         }
         Ok(label_start_index..self.data_start_row)
-        /*
-        loop {
-            let cell = self.cell(row_cursor, self.timestamp_col);
-            match cell {
-                DataType::Empty => {
-                    // Keep going until reaching the label
-                }
-                DataType::String(value) => {
-                    if inspector.inspect_if_skippable(value) {
-                        // Keep going until reaching the label
-                        log::info!("Skipping label element {} purposefully in {}", value, self);
-                    } else {
-                        // Yes!
-                        break Ok(());
-                    }
-                }
-                _ => break Err(AnalysisError::unsupported(
-                    format!("Not allowed data type {:?} in row {} of {}", cell, row_cursor, self)
-                ))
-            }
-            if row_cursor == 0 {
-                break Err(AnalysisError::unsupported("No label position found"));
-            }
-            row_cursor -= 1;
-        }?;
-        let label_bottom_index = row_cursor;
-        log::info!("Found label_bottom_index at {} in {}", label_bottom_index, self);
-        // Now scan upwards until we receive an empty cell or end of document
-        loop {
-            if row_cursor == 0 {
-                break Ok(0..=label_bottom_index);
-            }
-            row_cursor -= 1;
-            let cell = self.cell(row_cursor, self.timestamp_col);
-            match cell {
-                DataType::Empty => {
-                    // Okay, so the last row was the top index of the label
-                    let last_row = row_cursor + 1;
-                    break Ok(last_row..=label_bottom_index);
-                },
-                DataType::String(value) => {
-                    if !value.contains("Period") && !value.contains("period") {
-                        // This is probably the header of the document or something like that
-                        break Ok((row_cursor + 1)..=label_bottom_index);
-                    }
-                    // Keep going
-                },
-                _ => break Err(AnalysisError::unsupported(
-                    format!("Not allowed data type {:?} in row {} of {}", cell, row_cursor, self)
-                ))
-            }
-        }*/
     }
 
     /// Generates column information. If there is no detected column at the specified column index,
@@ -609,11 +557,8 @@ impl SupportedSheet<'_, '_> {
             if columns.len() != row_data.len() {
                 let percent_full = row_data.len() as f32 / columns.len() as f32;
                 if percent_full < 0.15 {
-                    // Probably a nothing row worth skipping
+                    // Probably a useless row worth skipping
                     continue;
-                } else if percent_full < 0.80 {
-                    //log::warn!("Percent full at {}% in row {} of {} having {}",
-                    //    percent_full * 100.0, row_cursor, self, columns.iter().map(|c| format!("{}", c)).collect::<Vec<_>>().join(","));
                 }
             }
             let sheet = output.get_or_create_sheet(&timestamp).await;

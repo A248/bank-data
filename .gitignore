@@ -12,6 +12,12 @@ __pycache__/
 
 # Project-specific
 data/
+data-sample/
 downloaded-datasets/
 /existing-work/
 data-backups/
+output-timestamp-Discriminant(0).csv
+output-timestamp-Discriminant(1).csv
+output-timestamp-Discriminant(2).csv
+output-timestamp-Discriminant(3).csv
+output-timestamp-Discriminant(4).csv

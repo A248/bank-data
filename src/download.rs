@@ -132,8 +132,8 @@ impl MonthlyReport {
         }
 
         async fn attempt_urls_using<const M: usize, const Y: usize, DH>(months: [&str; M],
-                                                                    years: [&str; Y],
-                                                                    connection: &mut Connection<'_, DH>)
+                                                                        years: [&str; Y],
+                                                                        connection: &mut Connection<'_, DH>)
             -> Result<ReportStatus> where DH: DownloadHandler {
 
             for month in months {

@@ -129,7 +129,6 @@ impl<'dh, DH> Connection<'dh, DH> where DH: DownloadHandler {
     }
 
     pub fn hit_count(self) -> usize {
-        self.sender.is_closed();
         self.hit_count
     }
 }
