@@ -111,10 +111,6 @@ impl<'dh, DH> Connection<'dh, DH> where DH: DownloadHandler {
                 _else => true
             }
         };
-        if refresh_connection {
-            let host = std::mem::replace(&mut self.host, (Box::default(), 0));
-            *self = Self::open_connection_internal(self.handler, host, self.hit_count).await?;
-        }
         let file = OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -124,6 +120,10 @@ impl<'dh, DH> Connection<'dh, DH> where DH: DownloadHandler {
             if let Some(next_chunk) = frame.data_ref() {
                 file.write_all(&next_chunk).await?;
             }
+        }
+        if refresh_connection {
+            let host = std::mem::take(&mut self.host);
+            *self = Self::open_connection_internal(self.handler, host, self.hit_count).await?;
         }
         Ok(())
     }
