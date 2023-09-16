@@ -137,35 +137,6 @@ impl FromStr for YearlyTimestamp {
     }
 }
 
-
-impl Timestamp {
-    /// Reparses a timestamp from a value we already displayed.
-    fn from_displayed_value(value: &str) -> Result<Self, CannotParse> {
-        if let Ok(year) = Year::from_str(value) {
-            return Ok(Self::CalendarYear(year));
-        }
-        if let Ok(report) = MonthlyReport::from_str(value) {
-            return Ok(Self::Monthly(report));
-        }
-        // Length for both quarterly and biannual data
-        const PARTIAL_YEAR_LEN: usize = "2009 Jan-Jun".len();
-        if value.len() == PARTIAL_YEAR_LEN {
-            // Parse year
-            if let Ok(year) = value[0..4].parse::<Year>() {
-                // Parse remainder
-                let remainder = &value[5..];
-                if let Ok(quarter) = Quarter::from_str(remainder) {
-                    return Ok(Self::Quarterly(year, quarter));
-                }
-                if let Ok(halfyear) = HalfYear::from_str(remainder) {
-                    return Ok(Self::BiAnnually(year, halfyear));
-                }
-            }
-        }
-        Err(CannotParse::simply())
-    }
-}
-
 impl TryFrom<(Year, &str)> for Timestamp {
     type Error = CannotParse;
 

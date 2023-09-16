@@ -17,7 +17,6 @@
  * and navigate to version 3 of the GNU General Public License.
  */
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt::{Debug, Display, Formatter, Write};
@@ -33,7 +32,6 @@ use futures::stream::FuturesUnordered;
 use async_std::stream::StreamExt;
 use async_std::sync::RwLock;
 use calamine::{DataType, Range, Reader};
-use futures::TryFutureExt;
 use smallvec::SmallVec;
 use crate::analysis::{AnalysisError, AnalysisResult, SheetAnalyzer};
 use crate::common::*;
@@ -44,20 +42,17 @@ pub struct MergeXL {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum FileStatus {
-    XlsUnsupported,
-    Success,
-    ErrorsAnalyzing(Vec<String>)
+enum FileStatus {
+    HiddenFile,
+    UnknownExtension,
+    XlsUnsupported(PathBuf),
+    Merged(usize, Option<FileErrorReport>)
 }
 
-/// For working with csv-async, we need AsRef<[u8]>. This wrapper imposes zero overhead.
-/// An excellent example of the beauty of Rust.
-struct CowAsU8<'d>(Cow<'d, str>);
-
-impl AsRef<[u8]> for CowAsU8<'_> {
-    fn as_ref(&self) -> &[u8] {
-        self.0.as_bytes()
-    }
+#[derive(Debug, Eq, PartialEq)]
+pub struct FileErrorReport {
+    path: PathBuf,
+    errors: Vec<String>
 }
 
 impl MergeXL {
@@ -88,20 +83,20 @@ impl MergeXL {
                     writer.write_record(&header).await?;
 
                     // Write all the data
-                    for (timestamp, mut data) in sheet.rows {
-                        let mut record = Vec::with_capacity(record_length);
+                    for (timestamp, data) in sheet.rows {
+                        let mut record = Vec::<&str>::with_capacity(record_length);
 
                         // Timestamp comes first
-                        record.push(CowAsU8(Cow::Owned(timestamp.to_string())));
+                        let timestamp = timestamp.to_string();
+                        record.push(&timestamp);
                         // Then the regular data columns
-                        for column in columns.iter() {
-                            let item = data.data.remove(column);
-                            let item = if let Some(item) = item {
-                                Cow::Owned(item.into_string())
+                        for column in &columns {
+                            let item = if let Some(item) = data.data.get(column) {
+                                item.as_ref()
                             } else {
-                                Cow::Borrowed("NA")
+                                "NA"
                             };
-                            record.push(CowAsU8(item));
+                            record.push(item);
                         }
                         writer.write_record(record).await?;
                     }
@@ -133,61 +128,66 @@ impl MergeXL {
             };
             tasks.push(async move { merge_file.merge().await });
         }
-        let mut file_statuses = HashMap::<PathBuf, FileStatus>::new();
-        while let Some(output) = tasks.next().await.transpose()? {
-            if let Some((path, status)) = output {
-                file_statuses.insert(path, status);
-            }
+        let mut file_statuses = Vec::new();
+        while let Some(status) = tasks.next().await.transpose()? {
+            file_statuses.push(status);
             // Keep polling
         }
         if file_statuses.is_empty() {
             log::warn!("No files loaded. Did you specify the correct data directory?");
             return Ok(());
         }
-        let report_intro = "Loaded and merged rows from input data files.\n-- Report --";
-        let mut report = String::from(report_intro);
-        {
-            let xls_unsupported = file_statuses
-                .iter()
-                .filter_map(|(path, status)| {
-                    if status == &FileStatus::XlsUnsupported {
-                        Some(path)
-                    } else {
-                        None
-                    }
-                })
-                .map(PathBuf::as_path)
-                .map(Path::to_string_lossy)
-                .collect::<Vec<_>>()
-                .join(", ");
-            if !xls_unsupported.is_empty() {
-                report.push_str("\nXLS files are unsupported. XLS files: ");
-                report.push_str(&xls_unsupported);
+        let mut file_success_count = 0;
+        let mut sheet_success_count = 0;
+        for status in &file_statuses {
+            if let FileStatus::Merged(success_count, _)  = status {
+                file_success_count += 1usize;
+                sheet_success_count += success_count;
             }
         }
-        {
-            let other_failures = file_statuses
-                .iter()
-                .filter_map(|(path, status)| {
-                    if let FileStatus::ErrorsAnalyzing(errors) = status {
-                        Some(format!(
-                            "  {}:\n    {}", path.to_string_lossy(), errors.join("\n    ")
-                        ))
-                    } else {
-                        None
+        let mut error_report = String::new();
+
+        macro_rules! format_errors_matching {
+            ($filtermap_impl:expr, $join_separator:literal, $heading:literal) => {
+                {
+                    let combined = file_statuses
+                        .iter()
+                        .filter_map($filtermap_impl)
+                        .collect::<Vec<_>>()
+                        .join($join_separator);
+                    if !combined.is_empty() {
+                        error_report.push_str($heading);
+                        error_report.push_str(&combined);
                     }
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !other_failures.is_empty() {
-                report.push_str("\nFailures while loading files:\n");
-                report.push_str(&other_failures);
+                }
             }
         }
-        if report == report_intro {
-            report.push_str("\n  Hooray, all sheets loaded with pure success.\n");
+        format_errors_matching!(|status| {
+            if let FileStatus::XlsUnsupported(path) = status {
+                Some(path.to_string_lossy())
+            } else {
+                None
+            }
+        }, ", ", "\nXLS files are unsupported. XLS files: ");
+        format_errors_matching!(|status| {
+            if let FileStatus::Merged(_, Some(FileErrorReport { path, errors })) = status {
+                Some(format!(
+                        "  {}:\n    {}", path.to_string_lossy(), errors.join("\n    ")
+                ))
+            } else {
+                None
+            }
+        }, "\n", "\nFailures while loading files:\n");
+
+        log::info!(
+            "Loaded and merged rows of {} sheets from {} data files.\n-- Report --",
+            sheet_success_count, file_success_count
+        );
+        if error_report.is_empty() {
+            log::info!("\n  Hooray, all sheets loaded with pure success.\n");
+        } else {
+            log::info!("{}", error_report);
         }
-        log::info!("{}", report);
         Ok(())
     }
 
@@ -217,49 +217,56 @@ struct MergeFile<'m> {
 }
 
 impl MergeFile<'_> {
-    async fn merge(&self) -> Result<Option<(PathBuf, FileStatus)>> {
+    async fn merge(&self) -> Result<FileStatus> {
         let filename = self.file.file_name();
         let filename = filename.to_string_lossy();
         if filename.starts_with('.') {
             // Hidden file; skip it
-            return Ok(None);
+            return Ok(FileStatus::HiddenFile);
         }
         let file = self.file.path();
 
         Ok(if filename.ends_with(".xlsx") {
             // Received correct file type
-            Some(self.perform_merge_data(file).await?)
+            self.perform_merge_data(file).await?
 
         } else if filename.ends_with(".xls") {
             // .xls currently unsupported
-            Some((file, FileStatus::XlsUnsupported))
+            FileStatus::XlsUnsupported(file)
 
         } else {
             // Not .xls or .xlsx
-            None
+            FileStatus::UnknownExtension
         })
     }
 
-    async fn perform_merge_data(&self, file: PathBuf) -> Result<(PathBuf, FileStatus)> {
-        task::spawn_blocking(move || {
+    async fn perform_merge_data(&self, file: PathBuf) -> Result<FileStatus> {
+        let (file, sheets) = task::spawn_blocking(move || {
             let sheets = blocking_load_all_sheets(&file)?;
-            Ok((file, sheets))
-        }).and_then(|(file, sheets)| async move {
-            let filename = file.to_string_lossy();
-            let mut errors = Vec::new();
-            for (name, sheet) in sheets {
-                let analyzer = SheetAnalyzer {
-                    source: &filename,
-                    name: &name,
-                    sheet
-                };
-                if let Err(error) = analyzer.merge_data(&self.merge_xl).await {
-                    errors.push(format!("{}: {}", name, error));
-                }
-            }
-            let status = if errors.is_empty() { FileStatus::Success } else { FileStatus::ErrorsAnalyzing(errors) };
-            Ok((file, status))
-        }).await
+            Ok::<_, eyre::Report>((file, sheets))
+        }).await?;
+
+        let filename = file.to_string_lossy();
+        let mut success_count = 0;
+        let mut errors = Vec::new();
+
+        for (name, sheet) in sheets {
+            let analyzer = SheetAnalyzer {
+                source: &filename,
+                name: &name,
+                sheet
+            };
+            match analyzer.merge_data(&self.merge_xl).await {
+                Ok(()) => success_count += 1,
+                Err(error) => errors.push(format!("{}: {}", name, error))
+            };
+        }
+        let error = if !errors.is_empty() {
+            Some(FileErrorReport { path: file, errors })
+        } else {
+            None
+        };
+        Ok(FileStatus::Merged(success_count, error))
     }
 }
 
